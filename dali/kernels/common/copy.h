@@ -45,6 +45,73 @@ void copy(void* out, const void* in, std::size_t N, cudaStream_t stream = 0) {
   }
 }
 
+template <typename StorageOut, typename StorageIn>
+void copy(void* const* out_data, const void* const*in_data, 
+          TensorListShape<> out_shape, TensorListShape<> in_shape, 
+          int64_t elem_size, cudaStream_t stream = 0) {
+  int M = in_shape.num_samples();
+  int N = out_shape.num_samples();
+
+  uint8 *out_start = nullptr;
+  const uint8 *in_start = nullptr;
+  int64_t out_len = 0, in_len = 0;
+  int i, o;
+  for (i = 0, o = 0; i < M && o < N;) {
+    int64_t in_sample_size  = volume(in_shape.tensor_shape_span(i)) * elem_size;
+    int64_t out_sample_size = volume(out_shape.tensor_shape_span(o)) * elem_size;
+    if (in_sample_size == 0) {
+      i++;
+      continue;
+    }
+    if (out_sample_size == 0) {
+      o++;
+      continue;
+    }
+    if (in_data[i] != in_start + in_len || out_data[o] != out_start + out_len) {
+      // discontinuity detected
+      if (in_len < out_len) {
+        assert(in_data[i] != in_start + in_len);
+        i++;
+        continue;
+      }
+      if (out_len < in_len) {
+        assert(out_data[o] != out_start + out_len);
+        o++;
+        continue;
+      }
+      assert(in_len == out_len && "Groups of contiguous samples must have equal length");
+      if (out_len > 0)
+        copy<StorageOut, StorageIn>(out_start, in_start, out_len, stream);
+      out_start = static_cast<uint8*>(out_data[o]);
+      in_start = static_cast<const uint8*>(in_data[i]);
+      in_len = 0;
+      out_len = 0;
+    }
+    in_len  += in_sample_size;
+    out_len += out_sample_size;
+    i++;
+    o++;
+  }
+
+  for (; i < M; i++) {
+    assert(in_data[i] == in_start + in_len);
+    int64_t in_sample_size  = volume(in_shape.tensor_shape_span(i)) * elem_size;
+    in_len += in_sample_size;
+  }
+
+  for (; o < N; o++) {
+    assert(in_data[o] == out_start + out_len);
+    int64_t out_sample_size  = volume(out_shape.tensor_shape_span(o)) * elem_size;
+    out_len += out_sample_size;
+  }
+
+  assert(i == M && o == N);
+  assert(in_len == out_len && "Groups of contiguous samples must have equal length");
+
+  if (out_len > 0)
+    copy<StorageOut, StorageIn>(out_start, in_start, out_len, stream);
+}
+
 template <typename StorageOut, typename TOut, int NDimOut,
           typename StorageIn, typename TIn, int NDimIn>
 void copy(const TensorView<StorageOut, TOut, NDimIn>& out,
@@ -73,67 +140,9 @@ void copy(const TensorListView<StorageOut, TOut, NDimOut> &out,
           cudaStream_t stream = 0) {
   static_assert(sizeof(TOut) == sizeof(TIn), "Tensor elements must be of equal size!");
   static_assert(!std::is_const<TOut>::value, "Cannot copy to a tensor of const elements!");
-  int M = in.num_samples();
-  int N = out.num_samples();
-
-  TOut *out_start = nullptr;
-  const TIn *in_start = nullptr;
-  int64_t out_len = 0, in_len = 0;
-  int i, o;
-  for (i = 0, o = 0; i < M && o < N;) {
-    int64_t in_sample_size  = volume(in.shape.tensor_shape_span(i));
-    int64_t out_sample_size = volume(out.shape.tensor_shape_span(o));
-    if (in_sample_size == 0) {
-      i++;
-      continue;
-    }
-    if (out_sample_size == 0) {
-      o++;
-      continue;
-    }
-    if (in.data[i] != in_start + in_len || out.data[o] != out_start + out_len) {
-      // discontinuity detected
-      if (in_len < out_len) {
-        assert(in.data[i] != in_start + in_len);
-        i++;
-        continue;
-      }
-      if (out_len < in_len) {
-        assert(out.data[o] != out_start + out_len);
-        o++;
-        continue;
-      }
-      assert(in_len == out_len && "Groups of contiguous samples must have equal length");
-      if (out_len > 0)
-        copy<StorageOut, StorageIn>(out_start, in_start, out_len * sizeof(TOut), stream);
-      out_start = out.data[o];
-      in_start = in.data[i];
-      in_len = 0;
-      out_len = 0;
-    }
-    in_len  += in_sample_size;
-    out_len += out_sample_size;
-    i++;
-    o++;
-  }
-
-  for (; i < M; i++) {
-    assert(in.data[i] == in_start + in_len);
-    int64_t in_sample_size  = volume(in.shape.tensor_shape_span(i));
-    in_len += in_sample_size;
-  }
-
-  for (; o < N; o++) {
-    assert(in.data[o] == out_start + out_len);
-    int64_t out_sample_size  = volume(out.shape.tensor_shape_span(o));
-    out_len += out_sample_size;
-  }
-
-  assert(i == M && o == N);
-  assert(in_len == out_len && "Groups of contiguous samples must have equal length");
-
-  if (out_len > 0)
-    copy<StorageOut, StorageIn>(out_start, in_start, out_len * sizeof(TOut), stream);
+  copy<StorageOut, StorageIn>(reinterpret_cast<void* const*>(out.data.data()), 
+                              reinterpret_cast<const void* const*>(in.data.data()), 
+                              out.shape, in.shape, sizeof(TIn), stream);
 }
 
 /**

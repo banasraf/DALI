@@ -64,7 +64,6 @@ class MakeContiguous : public Operator<MixedBackend> {
       DALI_ENFORCE(sample_dim == sample.shape().sample_dim(), "Inconsistent sample dimensions "
           "in input batch. Cannot copy to contiguous device buffer.");
     }
-
     if (ws.OutputIsType<CPUBackend>(0)) {
       auto &output = ws.Output<CPUBackend>(0);
       output.Resize(output_shape);
@@ -85,8 +84,10 @@ class MakeContiguous : public Operator<MixedBackend> {
       output.Resize(output_shape);
       output.SetLayout(layout);
       output.set_type(type);
-
       if (coalesced) {
+        // output.Resize(output_shape);
+        // output.SetLayout(layout);
+        // output.set_type(type);
         TimeRange tm("coalesced", TimeRange::kBlue);
 
         if (!cpu_output_buff.capacity()) {
@@ -119,6 +120,7 @@ class MakeContiguous : public Operator<MixedBackend> {
                   cudaMemcpyHostToDevice,
                   ws.stream()));
         }
+        // output.Copy(ws.InputRef<CPUBackend>(0), ws.stream());
       }
     }
     coalesced = true;

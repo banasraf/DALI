@@ -19,6 +19,7 @@
 #include <memory>
 
 #include "dali/core/error_handling.h"
+#include "dali/core/backend_tags.h"
 #include "dali/pipeline/data/allocator.h"
 
 namespace dali {
@@ -83,6 +84,22 @@ struct backend_to_storage_device<CPUBackend>
 template <>
 struct backend_to_storage_device<GPUBackend>
     : std::integral_constant<StorageDevice, StorageDevice::GPU> {};
+
+template <typename Backend>
+struct backend_to_storage;
+
+template <>
+struct backend_to_storage<CPUBackend> {
+  using type = StorageCPU;
+};
+
+template <>
+struct backend_to_storage<GPUBackend> {
+  using type = StorageGPU;
+};
+
+template <typename Backend>
+using backend_to_storage_t = typename backend_to_storage<Backend>::type;
 
 }  // namespace dali
 

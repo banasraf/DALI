@@ -26,6 +26,8 @@
 #include "dali/pipeline/data/backend.h"
 #include "dali/pipeline/data/buffer.h"
 #include "dali/pipeline/data/meta.h"
+#include "dali/kernels/common/copy.h"
+#include "dali/kernels/common/scatter_gather.h"
 
 namespace dali {
 
@@ -103,11 +105,36 @@ class DLL_PUBLIC TensorList : public Buffer<Backend> {
     }
     this->SetLayout(layout);
 
-    for (size_t i = 0; i < other.size(); ++i) {
-      type.template Copy<SrcBackend, Backend>(
+    if (std::is_same<Backend, GPUBackend>::value && std::is_same<SrcBackend, CPUBackend>::value) {
+      std::vector<void*> dst_data(ntensor());
+      std::vector<const void*> src_data(ntensor());
+      for (size_t i = 0; i < ntensor(); ++i) {
+        dst_data[i] = raw_mutable_tensor(i);
+        src_data[i] = other[i].raw_data();
+      }
+      if (other.is_pinned() && false) {
+        // std::cout << "pinned" << std::endl;
+        kernels::ScatterGatherGPU copy;
+        for (size_t i = 0; i < ntensor(); ++i) {
+          void *devPtr;
+          CUDA_CALL(cudaHostGetDevicePointer(&devPtr, const_cast<void*>(src_data[i]), 0));
+          copy.AddCopy(dst_data[i], devPtr, volume(shape_.tensor_shape_span(i)) * type.size());
+        }
+        copy.Run(stream);
+      } else {
+        // std::cout << "non pinned" << std::endl;
+        kernels::copy<StorageGPU, StorageCPU>(dst_data.data(), src_data.data(), 
+                                              shape_, shape_, type.size(), stream);
+      }
+    } else {
+      for (size_t i = 0; i < other.size(); ++i) {
+        type.template Copy<SrcBackend, Backend>(
           raw_mutable_tensor(i),
           other[i].raw_data(),
           other[i].size(), stream);
+      }
+    }
+    for (size_t i = 0; i < other.size(); ++i) {
       this->meta_[i].SetSourceInfo(other[i].GetSourceInfo());
       this->meta_[i].SetSkipSample(other[i].ShouldSkipSample());
     }
@@ -219,7 +246,7 @@ class DLL_PUBLIC TensorList : public Buffer<Backend> {
    */
   inline void ShareData(const shared_ptr<void> &ptr, size_t bytes, const TensorListShape<> &shape,
                         const TypeInfo &type = {}) {
-    // don't check ptr as we want to share empty data as well
+    DALI_ENFORCE(ptr != nullptr, "Input pointer must not be nullptr.");
 
     // Save our new pointer and bytes. Reset our type, shape, and size
     data_ = ptr;
@@ -256,7 +283,7 @@ class DLL_PUBLIC TensorList : public Buffer<Backend> {
    * persist while it is in use by the Tensor.
    */
   DLL_PUBLIC inline void ShareData(void *ptr, size_t bytes, const TensorListShape<> &shape,
-                                   const TypeInfo &type = {}) {
+                                   const TypeInfo &type = TypeInfo::Create<NoType>()) {
     ShareData(shared_ptr<void>(ptr, [](void *) {}), bytes, shape, type);
   }
 
@@ -388,10 +415,10 @@ class DLL_PUBLIC TensorList : public Buffer<Backend> {
 
   /**
    * @brief Checks whether the TensorList is
-   * contiguous. It returns true if and only if
+   * continuous. It returns true if and only if
    * all of the stored Tensors are densely packed in memory.
    */
-  inline bool IsContiguousTensor() const {
+  inline bool IsContinuousTensor() const {
     if (ntensor() == 0 || size_ == 0) {
       return true;
     }
