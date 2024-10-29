@@ -212,7 +212,7 @@ nvcv::Tensor AsTensor(void *data, const TensorShape<> &shape, DALIDataType daliD
                       TensorLayout layout) {
   auto dtype = GetDataType(daliDType, 1);
   nvcv::TensorDataStridedCuda::Buffer inBuf;
-  inBuf.basePtr = reinterpret_cast<NVCVByte *>(const_cast<void *>(data));
+  inBuf.basePtr = static_cast<NVCVByte *>(const_cast<void *>(data));
   inBuf.strides[shape.size() - 1] = dtype.strideBytes();
   for (int d = shape.size() - 2; d >= 0; --d) {
     inBuf.strides[d] = shape[d + 1] * inBuf.strides[d + 1];
@@ -229,7 +229,7 @@ nvcv::Tensor AsTensor(const void *data, span<const int64_t> shape_data, const nv
                       const nvcv::TensorLayout &layout) {
   int ndim = shape_data.size();
   nvcv::TensorDataStridedCuda::Buffer inBuf;
-  inBuf.basePtr = reinterpret_cast<NVCVByte *>(const_cast<void *>(data));
+  inBuf.basePtr = static_cast<NVCVByte *>(const_cast<void *>(data));
   inBuf.strides[ndim - 1] = dtype.strideBytes();
   for (int d = ndim - 2; d >= 0; --d) {
     inBuf.strides[d] = shape_data[d + 1] * inBuf.strides[d + 1];
@@ -239,25 +239,53 @@ nvcv::Tensor AsTensor(const void *data, span<const int64_t> shape_data, const nv
   return nvcv::TensorWrapData(inData);
 }
 
+int64_t calc_num_frames(const TensorShape<> &shape, int first_spatial_dim) {
+  return (first_spatial_dim > 0) ?
+          volume(&shape[0], &shape[first_spatial_dim]) :
+          1;
+}
 
-void PushTensorsToBatch(nvcv::TensorBatch &batch, const TensorList<GPUBackend> &t_list,
-                        int64_t start, int64_t count, const TensorLayout &layout) {
-  int ndim = t_list.sample_dim();
-  auto dtype = GetDataType(t_list.type(), 1);
-  TensorLayout out_layout = layout.empty() ? t_list.GetLayout() : layout;
-  DALI_ENFORCE(
-      out_layout.empty() || out_layout.size() == ndim,
-      make_string("Layout ", out_layout, " does not match the number of dimensions: ", ndim));
-  auto nvcv_layout = nvcv::TensorLayout(out_layout.c_str());
+void PushFramesToBatch(nvcv::TensorBatch &batch, const TensorList<GPUBackend> &t_list,
+                       int first_spatial_dim, int64_t starting_sample, int64_t frame_offset,
+                       int64_t num_frames, const TensorLayout &layout) {
+  int ndim = layout.ndim();
+  auto nvcv_layout = nvcv::TensorLayout(layout.c_str());
+  auto dtype = GetDataType(t_list.type());
+
   std::vector<nvcv::Tensor> tensors;
-  tensors.reserve(count);
+  tensors.reserve(num_frames);
 
-  for (int s = 0; s < count; ++s) {
-    tensors.push_back(AsTensor(t_list.raw_tensor(s + start), t_list.tensor_shape_span(s + start),
-                               dtype, nvcv_layout));
+  const auto &input_shape = t_list.shape();
+  int64_t sample_id = starting_sample - 1;
+  auto type_size = dtype.strideBytes();
+  std::vector<int64_t> frame_shape(ndim, 1);
+
+  auto frame_stride = 0;
+  int sample_nframes = 0;
+  const uint8_t *data = nullptr;
+
+  for (int64_t i = 0; i < num_frames; ++i) {
+    if (frame_offset == sample_nframes) {
+      frame_offset = 0;
+      do {
+        ++sample_id;
+        auto sample_shape = input_shape[sample_id];
+        DALI_ENFORCE(sample_id < t_list.num_samples());
+        std::copy(&sample_shape[first_spatial_dim], &sample_shape[input_shape.sample_dim()],
+                  frame_shape.begin());
+        frame_stride = volume(frame_shape) * type_size;
+        sample_nframes = calc_num_frames(sample_shape, first_spatial_dim);
+      } while (sample_nframes * frame_stride == 0);  // we skip empty samples
+      data =
+          static_cast<const uint8_t *>(t_list.raw_tensor(sample_id)) + frame_stride * frame_offset;
+    }
+    tensors.push_back(AsTensor(data, make_span(frame_shape), dtype, nvcv_layout));
+    data += frame_stride;
+    frame_offset++;
   }
   batch.pushBack(tensors.begin(), tensors.end());
 }
+
 
 cvcuda::Workspace NVCVOpWorkspace::Allocate(const cvcuda::WorkspaceRequirements &reqs,
                                             kernels::Scratchpad &scratchpad) {

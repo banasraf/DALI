@@ -134,12 +134,27 @@ void AllocateImagesLike(nvcv::ImageBatchVarShape &output, const TensorList<GPUBa
  */
 void PushImagesToBatch(nvcv::ImageBatchVarShape &batch, const TensorList<GPUBackend> &t_list);
 
+
 /**
- * @brief Push samples from a given tensor list to a given TensorBatch.
- * [start, start+count) determines the range of samples in the TensorList that will be used.
+ * @brief Push a range of frames from the input TensorList as samples in the output TensorBatch.
+ *
+ * The input TensorList is interpreted as sequence of frames where innermost dimensions
+ * starting from `first_spatial_dim` are the frames' dimensions.
+ *
+ * The range of frames is determined by the `starting_sample`, `frame_offset`
+ * and `num_frames` arguments.
+ * `starting_sample` is an index of the first source sample from the input TensorList. All the samples before that are skipped.
+ * `frame_offset` is an index of a first frame in the starting sample to be taken.
+ * `num_frames` is the total number of frames that will be pushed to the output TensorBatch.
+ *
+ * @param batch output TensorBatch
+ * @param t_list input TensorList
+ * @param layout layout of the output TensorBatch
  */
-void PushTensorsToBatch(nvcv::TensorBatch &batch, const TensorList<GPUBackend> &t_list,
-                        int64_t start, int64_t count, const TensorLayout &layout);
+void PushFramesToBatch(nvcv::TensorBatch &batch, const TensorList<GPUBackend> &t_list,
+                       int first_spatial_dim, int64_t starting_sample, int64_t frame_offset,
+                       int64_t num_frames, const TensorLayout &layout);
+
 
 class NVCVOpWorkspace {
  public:
