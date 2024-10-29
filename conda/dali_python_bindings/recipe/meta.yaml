@@ -81,14 +81,21 @@ requirements:
     - astunparse >=1.6.0
     - gast >=0.3.3
     - dm-tree >=0.1.8
+    - packaging
     - nvidia-dali-core{% if environ.get('NVIDIA_DALI_BUILD_FLAVOR', '')|length %}{{"-" + environ.get('NVIDIA_DALI_BUILD_FLAVOR', '')}}{% endif %}-cuda{{ environ.get('CUDA_VERSION', '') | replace(".","") }} ={{ environ.get('DALI_CONDA_BUILD_VERSION', '') }}
     - nvidia-nvimagecodec-cuda{{ environ.get('CUDA_VERSION', '') | replace(".","") }}
   run:
     - python
+    # libprotobuf-static we link statically depends on libabseil so add libprotobuf here as a runtime
+    # dependency to install the right version on the libabseil (as protobuf depends on
+    # libprotobuf-static and a newer version of libprotobuf-static may be available than
+    # the protobuf was build with)
+    - libprotobuf =5.27.4
     - future
     - astunparse >=1.6.0
     - gast >=0.3.3
     - dm-tree >=0.1.8
+    - packaging
     - nvidia-dali-core{% if environ.get('NVIDIA_DALI_BUILD_FLAVOR', '')|length %}{{"-" + environ.get('NVIDIA_DALI_BUILD_FLAVOR', '')}}{% endif %}-cuda{{ environ.get('CUDA_VERSION', '') | replace(".","") }} ={{ environ.get('DALI_CONDA_BUILD_VERSION', '') }}
     - nvidia-nvimagecodec-cuda{{ environ.get('CUDA_VERSION', '') | replace(".","") }}
 about:

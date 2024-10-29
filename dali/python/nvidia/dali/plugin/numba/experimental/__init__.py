@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from distutils.version import LooseVersion
+from packaging.version import Version
 
 from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.data_node import DataNode as _DataNode
@@ -25,6 +25,7 @@ import numba as nb
 
 
 _to_numpy = {
+    dali_types.BOOL: "bool_",
     dali_types.UINT8: "uint8",
     dali_types.UINT16: "uint16",
     dali_types.UINT32: "uint32",
@@ -39,6 +40,7 @@ _to_numpy = {
 }
 
 _to_numba = {
+    dali_types.BOOL: numba_types.boolean,
     dali_types.UINT8: numba_types.uint8,
     dali_types.UINT16: numba_types.uint16,
     dali_types.UINT32: numba_types.uint32,
@@ -55,8 +57,8 @@ _to_numba = {
 
 # Minimal version of Numba that is required for Numba GPU operator to work
 minimal_numba_version = {
-    11: LooseVersion("0.55.2"),
-    12: LooseVersion("0.57.0"),
+    11: Version("0.55.2"),
+    12: Version("0.57.0"),
 }
 
 
@@ -194,7 +196,7 @@ class NumbaFunction(
         for dali_type, ndim in zip(types, dims):
             cuda_arguments.append(numba_types.Array(_to_numba[dali_type], ndim, "C"))
 
-        if LooseVersion(nb.__version__) < LooseVersion("0.57.0"):
+        if Version(nb.__version__) < Version("0.57.0"):
             cres = cuda.compiler.compile_cuda(run_fn, numba_types.void, cuda_arguments)
         else:
             pipeline = Pipeline.current()
@@ -208,7 +210,7 @@ class NumbaFunction(
         code = run_fn.__code__
         filename = code.co_filename
         linenum = code.co_firstlineno
-        if LooseVersion(nb.__version__) < LooseVersion("0.57.0"):
+        if Version(nb.__version__) < Version("0.57.0"):
             nvvm_options["debug"] = False
             nvvm_options["lineinfo"] = False
             lib, _ = tgt_ctx.prepare_cuda_kernel(
@@ -507,7 +509,7 @@ class NumbaFunction(
 
     @staticmethod
     def _check_minimal_numba_version(throw: bool = True):
-        current_version = LooseVersion(nb.__version__)
+        current_version = Version(nb.__version__)
         toolkit_version = cuda.runtime.get_version()
         if toolkit_version[0] not in minimal_numba_version:
             if throw:
@@ -520,7 +522,7 @@ class NumbaFunction(
                 raise RuntimeError(
                     f"Insufficient Numba version. Numba GPU operator "
                     f"requires Numba {str(min_ver)} or higher. "
-                    f"Detected version: {str(LooseVersion(nb.__version__))}."
+                    f"Detected version: {str(Version(nb.__version__))}."
                 )
             else:
                 return False

@@ -101,10 +101,6 @@ class WarpPerspective : public nvcvop::NVCVSequenceOperator<StatelessOperator> {
     return true;
   }
 
-  bool CanInferOutputs() const override {
-    return true;
-  }
-
   float4 GetFillValue(int channels) const {
     if (fill_value_arg_.size() > 1) {
       if (channels > 0) {
@@ -231,7 +227,7 @@ class WarpPerspective : public nvcvop::NVCVSequenceOperator<StatelessOperator> {
   NVCVBorderType border_mode_ = NVCV_BORDER_CONSTANT;
   NVCVInterpolationType interp_type_ = NVCV_INTERP_NEAREST;
   std::vector<float> fill_value_arg_{0, 0, 0, 0};
-  float4 fill_value_;
+  float4 fill_value_{};
   bool inverse_map_ = false;
   bool ocv_pixel_ = true;
   std::optional<cvcuda::WarpPerspective> warp_perspective_;

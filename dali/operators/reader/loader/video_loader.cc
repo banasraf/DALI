@@ -564,6 +564,8 @@ void VideoLoader::read_file() {
 
   bool is_first_frame = true;
   int last_key_frame = -1;
+  int previous_last_key_frame = -1;
+  bool previous_last_key_frame_updated = false;
   bool key = false;
   bool seek_must_succeed = false;
   // how many key frames following the last requested frames we saw so far
@@ -574,29 +576,37 @@ void VideoLoader::read_file() {
   int frames_send = 0;
   VidReqStatus dec_status = VidReqStatus::REQ_IN_PROGRESS;
 
-  while (av_read_frame(file.fmt_ctx_.get(), &raw_pkt) >= 0) {
-    auto pkt = pkt_ptr(&raw_pkt, av_packet_unref);
+  int read_frame_ret = 0;
+  while ((read_frame_ret = av_read_frame(file.fmt_ctx_.get(), &raw_pkt)) >= 0 ||
+          dec_status == VidReqStatus::REQ_NOT_STARTED) {
+    pkt_ptr pkt = {nullptr, av_packet_unref};
+    int64_t frame = 0;
 
-    stats_.bytes_read += pkt->size;
-    stats_.packets_read++;
+    if (read_frame_ret >= 0) {
+      pkt = pkt_ptr(&raw_pkt, av_packet_unref);
 
-    if (pkt->stream_index != file.vid_stream_idx_) {
-        continue;
+      stats_.bytes_read += pkt->size;
+      stats_.packets_read++;
+
+      if (pkt->stream_index != file.vid_stream_idx_) {
+          continue;
+      }
+
+      frame = av_rescale_q(pkt->pts - file.start_time_,
+                                file.stream_base_,
+                                file.frame_base_);
+      LOG_LINE << "Frame candidate " << frame << " (for " << req.frame  <<" )...\n";
+
+      file.last_frame_ = frame;
+      key = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
     }
-
-    auto frame = av_rescale_q(pkt->pts - file.start_time_,
-                              file.stream_base_,
-                              file.frame_base_);
-    LOG_LINE << "Frame candidate " << frame << " (for " << req.frame  <<" )...\n";
-
-    file.last_frame_ = frame;
-    key = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
 
     // if decoding hasn't produced any frames after providing kStartupFrameThreshold frames,
     // or we are at next key frame
     if (last_key_frame != -1 &&
         ((key && last_key_frame != frame && last_key_frame != 0) ||
-          frames_send > kStartupFrameThreshold) &&
+          frames_send > kStartupFrameThreshold ||
+          read_frame_ret < 0) &&
         dec_status == VidReqStatus::REQ_NOT_STARTED) {
         if (last_key_frame <= 0) {
           if (vid_decoder_) {
@@ -607,11 +617,23 @@ void VideoLoader::read_file() {
                     "already 0");
         }
 
+      if (previous_last_key_frame < 0) {
+        previous_last_key_frame = last_key_frame - 1;
+        previous_last_key_frame_updated = true;
+      }
+      if (previous_last_key_frame_updated == false) {
+        --previous_last_key_frame;
+      }
       LOG_LINE << "Decoding not started, seek to preceding key frame, "
-                << "current frame " << frame
-                << ", last key frame " << last_key_frame
-                << ", is_key " << key << std::endl;
-      seek(file, last_key_frame - 1);
+               << " frames_send vs kStartupFrameThreshold: "
+               << frames_send << " / " << kStartupFrameThreshold
+               << ", av_read_frame result: "
+               << read_frame_ret
+               << ", current frame " << frame
+               << ", look for a key frame before " << previous_last_key_frame
+               << ", is_key " << key << std::endl;
+      seek(file, previous_last_key_frame);
+      previous_last_key_frame_updated = false;
       frames_send = 0;
       last_key_frame = -1;
       continue;
@@ -619,6 +641,10 @@ void VideoLoader::read_file() {
 
     if (key) {
       last_key_frame = frame;
+      if (frame < previous_last_key_frame) {
+        previous_last_key_frame = frame;
+        previous_last_key_frame_updated = true;
+      }
     }
 
     int pkt_frames = 1;

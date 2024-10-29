@@ -148,14 +148,15 @@ template <typename DstBackend, typename SrcBackend, template <typename> typename
 void CopyImpl(DstBatch<DstBackend> &dst, const SrcBatch<SrcBackend> &src, const TypeInfo &type_info,
               AccessOrder copy_order, bool use_copy_kernel = false) {
   if (dst.IsContiguous() && src.IsContiguous()) {
-    type_info.Copy<DstBackend, SrcBackend>(unsafe_raw_mutable_data(dst), unsafe_raw_data(src),
+    type_info.Copy<DstBackend, SrcBackend>(contiguous_raw_mutable_data(dst),
+                                           contiguous_raw_data(src),
                                            dst.shape().num_elements(), copy_order.stream(),
                                            use_copy_kernel);
   } else if (dst.IsContiguous() && !src.IsContiguous()) {
-    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(unsafe_raw_mutable_data(dst), src,
+    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(contiguous_raw_mutable_data(dst), src,
                                                           type_info, copy_order, use_copy_kernel);
   } else if (!dst.IsContiguous() && src.IsContiguous()) {
-    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(dst, unsafe_raw_data(src), type_info,
+    copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(dst, contiguous_raw_data(src), type_info,
                                                           copy_order, use_copy_kernel);
   } else {
     copy_impl::CopySamplewiseImpl<DstBackend, SrcBackend>(dst, src, type_info, copy_order,
@@ -193,7 +194,6 @@ template <typename Backend>
 TensorList<Backend> &TensorList<Backend>::operator=(TensorList<Backend> &&other) noexcept {
   if (&other != this) {
     contiguous_buffer_ = std::move(other.contiguous_buffer_);
-    buffer_bkp_ = std::move(other.buffer_bkp_);
     tensors_ = std::move(other.tensors_);
 
     state_ = other.state_;
@@ -759,25 +759,23 @@ void TensorList<Backend>::MakeNoncontiguous() {
 
 template <typename Backend>
 void TensorList<Backend>::DoMakeNoncontiguous() {
-  // We clear the contiguous_buffer_, as we are now non-contiguous.
-  buffer_bkp_ = contiguous_buffer_.get_data_ptr();
-  contiguous_buffer_.reset();
+  auto &contiguous_ptr = contiguous_buffer_.get_data_ptr();
   for (auto &t : tensors_) {
     // If the Tensor was aliasing the contiguous buffer, mark it as not sharing any data.
     // This will allow for the individual buffers to be resized.
     // The downside of this is we may keep the big contiguous buffer until all individual
     // samples are replaced.
-    if (same_managed_object(buffer_bkp_, t.data_)) {
+    if (same_managed_object(contiguous_ptr, t.data_)) {
       t.detach();
     }
   }
+  contiguous_buffer_.reset();
 }
 
 
 template <typename Backend>
 void TensorList<Backend>::Reset() {
   contiguous_buffer_.reset();
-  buffer_bkp_.reset();
   // TODO(klecki): Is there any benefit to call Reset on all?
   tensors_.clear();
 
@@ -786,8 +784,8 @@ void TensorList<Backend>::Reset() {
   sample_dim_ = -1;
   shape_ = {};
   layout_ = "";
-  // N.B. state_, pinned_, order_ and device_ are not reset here, as they might be previously set
-  // up via the executor - TODO(klecki) - consider if we want to keep this behaviour
+  // N.B. state_, pinned_, order_, device_ and ready_ are not reset here, as they might be
+  // previously set up via the executor - TODO(klecki) - consider if we want to keep this behaviour
 }
 
 
@@ -857,8 +855,6 @@ void TensorList<Backend>::ShareData(const TensorList<Backend> &tl) {
   if (!same_data)
     Reset();
 
-  buffer_bkp_.reset();  // TODO(michalz): perhaps we should copy it from the source, too?
-
   state_ = tl.state_;
   curr_num_tensors_ = tl.curr_num_tensors_;
   type_ = tl.type_;
@@ -868,6 +864,7 @@ void TensorList<Backend>::ShareData(const TensorList<Backend> &tl) {
   pinned_ = tl.pinned_;
   order_ = tl.order_;
   device_ = tl.device_;
+  ready_ = tl.ready_;
 
   if (tl.IsContiguous()) {
     if (!same_data)
@@ -946,7 +943,7 @@ Tensor<Backend> TensorList<Backend>::AsReshapedTensor(const TensorShape<> &new_s
   }
 
   result.ShareData(std::move(ptr), capacity(), is_pinned(),
-                   new_shape, type(), device_id(), order());
+                   new_shape, type(), device_id(), order(), ready_);
 
   auto result_layout = GetLayout();
   if (result_layout.ndim() + 1 == new_shape.sample_dim()) {
@@ -974,11 +971,11 @@ Tensor<Backend> TensorList<Backend>::AsTensor() {
 template <typename Backend>
 void TensorList<Backend>::ShareData(shared_ptr<void> ptr, size_t bytes, bool pinned,
                                     const TensorListShape<> &shape, DALIDataType type,
-                                    int device_id, AccessOrder order, const TensorLayout &layout) {
+                                    int device_id, AccessOrder order, const TensorLayout &layout,
+                                    CUDASharedEvent ready) {
   contiguous_buffer_.set_backing_allocation(std::move(ptr), bytes, pinned,
                                             type, shape.num_elements(),
                                             device_id, order);
-  buffer_bkp_.reset();
   tensors_.clear();
   tensors_.resize(shape.num_samples());
 
@@ -990,6 +987,7 @@ void TensorList<Backend>::ShareData(shared_ptr<void> ptr, size_t bytes, bool pin
   layout_ = layout;
   pinned_ = pinned;
   device_ = device_id;
+  ready_ = ready;
   if (order)
     order_ = order;
   recreate_views();
@@ -1050,7 +1048,27 @@ void TensorList<Backend>::resize_tensors(int new_size) {
 
 template <typename Backend>
 void TensorList<Backend>::UpdatePropertiesFromSamples(bool contiguous) {
+  if (contiguous) {
+    bool is_really_contiguous = true;
+
+    const uint8_t *base_ptr = static_cast<const uint8_t *>(contiguous_buffer_.raw_data());
+    size_t size = type_info().size();
+
+    for (int i = 0; i < num_samples(); ++i) {
+      if (tensors_[i].raw_data() == nullptr)
+        DALI_ENFORCE(shape_[i].num_elements() == 0,
+                     "Internal error: a non-empty sample has a null data pointer.");
+      if (base_ptr != tensors_[i].raw_data()) {
+        is_really_contiguous = false;
+        break;
+      }
+      base_ptr += shape_[i].num_elements() * size;
+    }
+    DALI_ENFORCE(is_really_contiguous,
+                 "Internal error: The tensor list isn't really contiguous as claimed.");
+  }
   state_.Update(contiguous ? BatchContiguity::Contiguous : BatchContiguity::Noncontiguous);
+
   // assume that the curr_num_tensors_ is valid
   DALI_ENFORCE(curr_num_tensors_ > 0,
                "Unexpected empty output of per-sample operator. Internal DALI error.");
@@ -1130,7 +1148,6 @@ bool TensorList<Backend>::shares_data() const {
   }
   return false;
 }
-
 
 template class DLL_PUBLIC TensorList<CPUBackend>;
 template class DLL_PUBLIC TensorList<GPUBackend>;

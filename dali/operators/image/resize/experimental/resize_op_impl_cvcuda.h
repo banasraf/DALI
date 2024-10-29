@@ -222,6 +222,7 @@ class ResizeOpImplCvCuda : public ResizeBase<GPUBackend>::Impl {
 
   TensorListShape<frame_ndim> in_shape_, out_shape_;
   int total_frames_;  // number of non-empty frames
+
   std::vector<ResamplingParamsND<spatial_ndim>> params_;
   int first_spatial_dim_;
 

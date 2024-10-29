@@ -44,7 +44,6 @@
 #include "dali/pipeline/pipeline_debug.h"
 #include "dali/plugin/plugin_manager.h"
 #include "dali/python/python3_compat.h"
-#include "dali/util/half.hpp"
 #include "dali/util/pybind.h"
 #include "dali/util/user_stream.h"
 
@@ -201,7 +200,7 @@ void FillTensorFromDlPack(py::capsule capsule, SourceDataType<SrcBackend> *batch
                   dl_tensor.device.device_type == kDLCPU),
                "DLPack device type doesn't match Tensor type");
 
-  const TypeInfo &dali_type = TypeTable::GetTypeInfo(DLToDALIType(dl_tensor.dtype));
+  const TypeInfo &dali_type = TypeTable::GetTypeInfo(ToDALIType(dl_tensor.dtype));
   TensorShape<> shape;
   shape.resize(dl_tensor.ndim);
   for (ssize_t i = 0; i < dl_tensor.ndim; ++i) {
@@ -498,7 +497,7 @@ void ExposeTensor(py::module &m) {
       [](Tensor<CPUBackend> &t) -> py::capsule {
         SampleView<CPUBackend> sv{t.raw_mutable_data(), t.shape(), t.type()};
 
-        return TensorToDLPackView(sv, t.device_id());
+        return TensorToDLPackView(sv, t.is_pinned(), t.device_id());
       },
       R"code(
       Exposes tensor data as DLPack compatible capsule.
@@ -693,7 +692,7 @@ void ExposeTensor(py::module &m) {
       [](Tensor<GPUBackend> &t) -> py::capsule {
         SampleView<GPUBackend> sv{t.raw_mutable_data(), t.shape(), t.type()};
 
-        return TensorToDLPackView(sv, t.device_id());
+        return TensorToDLPackView(sv, t.is_pinned(), t.device_id());
       },
       R"code(
       Exposes tensor data as DLPack compatible capsule.
@@ -833,7 +832,7 @@ std::unique_ptr<Tensor<Backend> > TensorListGetItemImpl(TensorList<Backend> &t, 
   }
   auto ptr = std::make_unique<Tensor<Backend>>();
   // TODO(klecki): Rework this with proper sample-based tensor batch data structure
-  auto sample_shared_ptr = unsafe_sample_owner(t, id);
+  auto &sample_shared_ptr = unsafe_sample_owner(t, id);
   ptr->ShareData(sample_shared_ptr, t.capacity(), t.is_pinned(), t.shape()[id], t.type(),
                  t.device_id(), t.order());
   ptr->SetMeta(t.GetMeta(id));
@@ -1127,7 +1126,7 @@ void ExposeTensorList(py::module &m) {
                 "buffer info for tensor w/ invalid type.");
             DALI_ENFORCE(tl.IsDenseTensor(),
                         "Tensors in the list must have the same shape");
-            raw_mutable_data = unsafe_raw_mutable_data(tl);
+            raw_mutable_data = contiguous_raw_mutable_data(tl);
           }
 
           if (IsValidType(tl.type())) {
@@ -1208,7 +1207,7 @@ void ExposeTensorList(py::module &m) {
     .def("data_ptr",
         [](TensorList<CPUBackend> &tl) {
           return py::reinterpret_borrow<py::object>(
-              PyLong_FromVoidPtr(unsafe_raw_mutable_data(tl)));
+              PyLong_FromVoidPtr(contiguous_raw_mutable_data(tl)));
         },
       R"code(
       Returns the address of the first element of TensorList.
@@ -1414,7 +1413,7 @@ void ExposeTensorList(py::module &m) {
     .def("data_ptr",
         [](TensorList<GPUBackend> &tl) {
           return py::reinterpret_borrow<py::object>(
-              PyLong_FromVoidPtr(unsafe_raw_mutable_data(tl)));
+              PyLong_FromVoidPtr(contiguous_raw_mutable_data(tl)));
         },
       R"code(
       Returns the address of the first element of TensorList.
